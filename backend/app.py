@@ -2,6 +2,7 @@
 NewsAlpha — Flask API Backend (with Chatbot)
 =============================================
 Serves SQLite analysis data + chatbot to the React frontend.
+XLRE excluded from all results per TA recommendation (only 37 trading days).
 
 Usage:
     pip install flask flask-cors
@@ -21,6 +22,9 @@ CORS(app)
 # Database helper
 # ---------------------------------------------------------------------------
 DATABASE = os.environ.get("NEWSALPHA_DB", "cs179g_project.db")
+
+# Sector excluded due to insufficient sample size (37 trading days)
+EXCLUDE = "XLRE"
 
 
 def get_db():
@@ -50,7 +54,10 @@ def query_db(sql, args=(), one=False):
 @app.route("/api/health")
 def health():
     try:
-        count = query_db("SELECT COUNT(*) as n FROM joined_sentiment_market", one=True)
+        count = query_db(
+            "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != ?",
+            [EXCLUDE], one=True,
+        )
         tables = query_db("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         return jsonify({
             "status": "ok",
@@ -67,13 +74,21 @@ def health():
 # ---------------------------------------------------------------------------
 @app.route("/api/sectors")
 def sectors():
-    accuracy = query_db("SELECT * FROM prediction_accuracy ORDER BY accuracy DESC")
-    correlations = query_db("SELECT * FROM sector_correlations ORDER BY correlation DESC")
+    accuracy = query_db(
+        "SELECT * FROM prediction_accuracy WHERE sector != ? ORDER BY accuracy DESC",
+        [EXCLUDE],
+    )
+    correlations = query_db(
+        "SELECT * FROM sector_correlations WHERE sector != ? ORDER BY correlation DESC",
+        [EXCLUDE],
+    )
     corr_map = {r["sector"]: r for r in correlations}
     article_counts = query_db("""
         SELECT sector, SUM(article_count) as total_articles
-        FROM joined_sentiment_market GROUP BY sector
-    """)
+        FROM joined_sentiment_market
+        WHERE sector != ?
+        GROUP BY sector
+    """, [EXCLUDE])
     article_map = {r["sector"]: r["total_articles"] for r in article_counts}
 
     result = []
@@ -99,6 +114,8 @@ def timeseries():
     sector = request.args.get("sector")
     if not sector:
         return jsonify({"error": "sector parameter is required"}), 400
+    if sector.upper() == EXCLUDE:
+        return jsonify([])
 
     sql = "SELECT * FROM joined_sentiment_market WHERE sector = ?"
     args = [sector]
@@ -118,19 +135,18 @@ def timeseries():
 
 @app.route("/api/timeseries/all")
 def timeseries_all():
-    sql = "SELECT * FROM joined_sentiment_market"
-    args = []
-    conditions = []
+    sql = "SELECT * FROM joined_sentiment_market WHERE sector != ?"
+    args = [EXCLUDE]
+
     start = request.args.get("start")
     end = request.args.get("end")
     if start:
-        conditions.append("date >= ?")
+        sql += " AND date >= ?"
         args.append(start)
     if end:
-        conditions.append("date <= ?")
+        sql += " AND date <= ?"
         args.append(end)
-    if conditions:
-        sql += " WHERE " + " AND ".join(conditions)
+
     sql += " ORDER BY date ASC, sector ASC"
     return jsonify(query_db(sql, args))
 
@@ -140,21 +156,29 @@ def timeseries_all():
 # ---------------------------------------------------------------------------
 @app.route("/api/correlations/same-sector")
 def same_sector_correlations():
-    return jsonify(query_db("SELECT * FROM sector_correlations ORDER BY correlation DESC"))
+    return jsonify(query_db(
+        "SELECT * FROM sector_correlations WHERE sector != ? ORDER BY correlation DESC",
+        [EXCLUDE],
+    ))
 
 
 @app.route("/api/correlations/cross-sector")
 def cross_sector_correlations():
     min_days = request.args.get("min_days", 0, type=int)
     return jsonify(query_db(
-        "SELECT * FROM cross_sector_correlations WHERE days >= ? ORDER BY ABS(correlation) DESC",
-        [min_days],
+        """SELECT * FROM cross_sector_correlations
+           WHERE days >= ? AND sent_sector != ? AND mkt_sector != ?
+           ORDER BY ABS(correlation) DESC""",
+        [min_days, EXCLUDE, EXCLUDE],
     ))
 
 
 @app.route("/api/correlations/next-day")
 def next_day_correlations():
-    return jsonify(query_db("SELECT * FROM next_day_correlations"))
+    return jsonify(query_db(
+        "SELECT * FROM next_day_correlations WHERE sector != ?",
+        [EXCLUDE],
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -162,17 +186,25 @@ def next_day_correlations():
 # ---------------------------------------------------------------------------
 @app.route("/api/accuracy/same-day")
 def same_day_accuracy():
-    return jsonify(query_db("SELECT * FROM prediction_accuracy ORDER BY accuracy DESC"))
+    return jsonify(query_db(
+        "SELECT * FROM prediction_accuracy WHERE sector != ? ORDER BY accuracy DESC",
+        [EXCLUDE],
+    ))
 
 
 @app.route("/api/accuracy/next-day")
 def next_day_accuracy():
-    return jsonify(query_db("SELECT * FROM next_day_accuracy ORDER BY next_day_accuracy DESC"))
+    return jsonify(query_db(
+        "SELECT * FROM next_day_accuracy WHERE sector != ? ORDER BY next_day_accuracy DESC",
+        [EXCLUDE],
+    ))
 
 
 @app.route("/api/accuracy/by-source")
 def source_accuracy():
-    return jsonify(query_db("SELECT * FROM source_accuracy ORDER BY accuracy DESC"))
+    return jsonify(query_db(
+        "SELECT * FROM source_accuracy ORDER BY accuracy DESC"
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +213,10 @@ def source_accuracy():
 @app.route("/api/volatility")
 def volatility():
     try:
-        return jsonify(query_db("SELECT * FROM volatility_correlations ORDER BY correlation ASC"))
+        return jsonify(query_db(
+            "SELECT * FROM volatility_correlations WHERE sector != ? ORDER BY correlation ASC",
+            [EXCLUDE],
+        ))
     except Exception:
         return jsonify({"error": "volatility_correlations table not found"}), 404
 
@@ -191,16 +226,27 @@ def volatility():
 # ---------------------------------------------------------------------------
 @app.route("/api/stats/overview")
 def overview_stats():
-    joined_count = query_db("SELECT COUNT(*) as n FROM joined_sentiment_market", one=True)
-    sector_count = query_db("SELECT COUNT(DISTINCT sector) as n FROM joined_sentiment_market", one=True)
-    overall_corr = query_db("SELECT AVG(correlation) as avg_correlation FROM sector_correlations", one=True)
+    joined_count = query_db(
+        "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != ?",
+        [EXCLUDE], one=True,
+    )
+    sector_count = query_db(
+        "SELECT COUNT(DISTINCT sector) as n FROM joined_sentiment_market WHERE sector != ?",
+        [EXCLUDE], one=True,
+    )
+    overall_corr = query_db(
+        "SELECT AVG(correlation) as avg_correlation FROM sector_correlations WHERE sector != ?",
+        [EXCLUDE], one=True,
+    )
     overall_acc = query_db(
-        "SELECT SUM(accuracy * num_days) / SUM(num_days) as weighted_accuracy, SUM(num_days) as total_days FROM prediction_accuracy",
-        one=True,
+        """SELECT SUM(accuracy * num_days) / SUM(num_days) as weighted_accuracy,
+           SUM(num_days) as total_days
+           FROM prediction_accuracy WHERE sector != ?""",
+        [EXCLUDE], one=True,
     )
     date_range = query_db(
-        "SELECT MIN(date) as min_date, MAX(date) as max_date FROM joined_sentiment_market",
-        one=True,
+        "SELECT MIN(date) as min_date, MAX(date) as max_date FROM joined_sentiment_market WHERE sector != ?",
+        [EXCLUDE], one=True,
     )
     return jsonify({
         "total_matched_days": joined_count["n"],
@@ -214,6 +260,9 @@ def overview_stats():
 @app.route("/api/stats/sector/<ticker>")
 def sector_detail(ticker):
     ticker = ticker.upper()
+    if ticker == EXCLUDE:
+        return jsonify({"error": f"{EXCLUDE} excluded due to insufficient sample size"}), 404
+
     corr = query_db("SELECT * FROM sector_correlations WHERE sector = ?", [ticker], one=True)
     acc = query_db("SELECT * FROM prediction_accuracy WHERE sector = ?", [ticker], one=True)
     next_acc = query_db("SELECT * FROM next_day_accuracy WHERE sector = ?", [ticker], one=True)
@@ -237,8 +286,13 @@ def sector_detail(ticker):
 # ---------------------------------------------------------------------------
 @app.route("/api/filters")
 def filters():
-    sectors = query_db("SELECT DISTINCT sector FROM joined_sentiment_market ORDER BY sector")
-    sources = query_db("SELECT DISTINCT source_name FROM source_accuracy ORDER BY source_name")
+    sectors = query_db(
+        "SELECT DISTINCT sector FROM joined_sentiment_market WHERE sector != ? ORDER BY sector",
+        [EXCLUDE],
+    )
+    sources = query_db(
+        "SELECT DISTINCT source_name FROM source_accuracy ORDER BY source_name"
+    )
     return jsonify({
         "sectors": [r["sector"] for r in sectors],
         "sources": [r["source_name"] for r in sources],
@@ -266,7 +320,7 @@ CHAT_PATTERNS = [
             r"(?:best|top|highest).*(?:predict|accura).*(?:sector|etf)",
             r"most accurate sector",
         ],
-        "sql": "SELECT sector, accuracy, num_days FROM prediction_accuracy ORDER BY accuracy DESC LIMIT 3",
+        "sql": "SELECT sector, accuracy, num_days FROM prediction_accuracy WHERE sector != 'XLRE' ORDER BY accuracy DESC LIMIT 3",
         "template": "The top sectors by same-day prediction accuracy are:\n{rows}",
         "format": lambda r: f"  • {r['sector']} — {r['accuracy']*100:.1f}% ({r['num_days']} trading days)",
     },
@@ -275,7 +329,7 @@ CHAT_PATTERNS = [
             r"(?:which|what).*(?:sector|etf).*(?:worst|lowest|least).*(?:accura|predict)",
             r"worst.*(?:predict|accura)",
         ],
-        "sql": "SELECT sector, accuracy, num_days FROM prediction_accuracy ORDER BY accuracy ASC LIMIT 3",
+        "sql": "SELECT sector, accuracy, num_days FROM prediction_accuracy WHERE sector != 'XLRE' ORDER BY accuracy ASC LIMIT 3",
         "template": "The worst-performing sectors by prediction accuracy are:\n{rows}",
         "format": lambda r: f"  • {r['sector']} — {r['accuracy']*100:.1f}% ({r['num_days']} trading days)",
     },
@@ -286,7 +340,7 @@ CHAT_PATTERNS = [
             r"(?:total|average|general).*accura",
             r"how accurate",
         ],
-        "sql": "SELECT SUM(accuracy * num_days) / SUM(num_days) as accuracy, SUM(num_days) as total_days FROM prediction_accuracy",
+        "sql": "SELECT SUM(accuracy * num_days) / SUM(num_days) as accuracy, SUM(num_days) as total_days FROM prediction_accuracy WHERE sector != 'XLRE'",
         "template": "The overall weighted prediction accuracy across all sectors is {accuracy_pct} based on {total_days} trading days. This exceeds the 50% random baseline, though modestly.",
         "single": True,
     },
@@ -296,7 +350,7 @@ CHAT_PATTERNS = [
             r"(?:which|what).*(?:sector|etf).*(?:highest|strongest|best).*corr",
             r"(?:strongest|highest|best).*corr",
         ],
-        "sql": "SELECT sector, correlation, days FROM sector_correlations ORDER BY correlation DESC LIMIT 3",
+        "sql": "SELECT sector, correlation, days FROM sector_correlations WHERE sector != 'XLRE' ORDER BY correlation DESC LIMIT 3",
         "template": "The sectors with the strongest sentiment-to-return correlations are:\n{rows}",
         "format": lambda r: f"  • {r['sector']} — r={r['correlation']:.4f} ({r['days']} days)",
     },
@@ -305,7 +359,7 @@ CHAT_PATTERNS = [
             r"overall.*corr",
             r"(?:average|general).*corr",
         ],
-        "sql": "SELECT AVG(correlation) as avg_corr FROM sector_correlations",
+        "sql": "SELECT AVG(correlation) as avg_corr FROM sector_correlations WHERE sector != 'XLRE'",
         "template": "The overall sentiment-return correlation across all sectors is {avg_corr}. This is very weak, consistent with the efficient market hypothesis — public news sentiment is largely already priced in.",
         "single": True,
     },
@@ -315,14 +369,14 @@ CHAT_PATTERNS = [
             r"cross.?sector",
             r"(?:sector|etf).*(?:predict|affect|influence).*(?:another|other|different)",
         ],
-        "sql": "SELECT sent_sector, mkt_sector, correlation, days FROM cross_sector_correlations WHERE days > 50 ORDER BY ABS(correlation) DESC LIMIT 5",
-        "template": "The strongest cross-sector sentiment-to-return correlations (50+ trading days) are:\n{rows}\nNote: XLRE-based pairs with only 37 days are excluded due to small sample sizes.",
+        "sql": "SELECT sent_sector, mkt_sector, correlation, days FROM cross_sector_correlations WHERE days > 50 AND sent_sector != 'XLRE' AND mkt_sector != 'XLRE' ORDER BY ABS(correlation) DESC LIMIT 5",
+        "template": "The strongest cross-sector sentiment-to-return correlations (50+ trading days, excluding XLRE) are:\n{rows}",
         "format": lambda r: f"  • {r['sent_sector']} -> {r['mkt_sector']} — r={r['correlation']:.4f} ({r['days']} days)",
     },
     # ── Correlation between two specific sectors ──
     {
         "patterns": [
-            r"(?:correlation|relationship|connection|significant|between).*(?:energy|tech|financ|health|real estate|consumer|industrial|defense|communication|leisure|homebuilder|staple|XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XLRE|XHB|ITA|PEJ)",
+            r"(?:correlation|relationship|connection|significant|between).*(?:energy|tech|financ|health|real estate|consumer|industrial|defense|communication|leisure|homebuilder|staple|XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XHB|ITA|PEJ)",
         ],
         "handler": "two_sector_lookup",
     },
@@ -357,6 +411,7 @@ CHAT_PATTERNS = [
                    (n.next_day_accuracy - p.accuracy) as change, p.num_days
             FROM prediction_accuracy p
             JOIN next_day_accuracy n ON p.sector = n.sector
+            WHERE p.sector != 'XLRE'
             ORDER BY change DESC LIMIT 5
         """,
         "template": "Sectors where next-day prediction improves over same-day:\n{rows}\nXLY and XLV show improved next-day accuracy, suggesting delayed market effects in consumer and health sectors.",
@@ -365,8 +420,8 @@ CHAT_PATTERNS = [
     # ── Specific sector lookup ──
     {
         "patterns": [
-            r"(?:tell|show|what about|info|data|how).*\b(XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XLRE|XHB|ITA|PEJ)\b",
-            r"\b(XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XLRE|XHB|ITA|PEJ)\b.*(?:accuracy|corr|predict|performance|how|doing)",
+            r"(?:tell|show|what about|info|data|how).*\b(XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XHB|ITA|PEJ)\b",
+            r"\b(XLK|XLF|XLY|XLI|XLC|XLE|XLP|XLV|XHB|ITA|PEJ)\b.*(?:accuracy|corr|predict|performance|how|doing)",
         ],
         "handler": "sector_lookup",
     },
@@ -379,10 +434,10 @@ CHAT_PATTERNS = [
         ],
         "sql": """
             SELECT
-                (SELECT COUNT(*) FROM joined_sentiment_market) as joined_rows,
-                (SELECT COUNT(DISTINCT sector) FROM joined_sentiment_market) as sectors
+                (SELECT COUNT(*) FROM joined_sentiment_market WHERE sector != 'XLRE') as joined_rows,
+                (SELECT COUNT(DISTINCT sector) FROM joined_sentiment_market WHERE sector != 'XLRE') as sectors
         """,
-        "template": "The dataset contains {joined_rows} matched sentiment-market records across {sectors} sector ETFs. The project analyzed 233,609 articles from 11 news sources, which after sector mapping and market-day matching produced these joined records.",
+        "template": "The dataset contains {joined_rows} matched sentiment-market records across {sectors} sector ETFs (XLRE excluded due to limited sample size). The project analyzed 233,609 articles from 11 news sources, which after sector mapping and market-day matching produced these joined records.",
         "single": True,
     },
     # ── Trading days ──
@@ -391,8 +446,8 @@ CHAT_PATTERNS = [
             r"(?:how many|number of).*(?:trading|trade).*days",
             r"trading days",
         ],
-        "sql": "SELECT sector, num_days FROM prediction_accuracy ORDER BY num_days DESC",
-        "template": "Trading days per sector:\n{rows}\nSectors with more trading days have more statistically reliable results.",
+        "sql": "SELECT sector, num_days FROM prediction_accuracy WHERE sector != 'XLRE' ORDER BY num_days DESC",
+        "template": "Trading days per sector:\n{rows}",
         "format": lambda r: f"  • {r['sector']} — {r['num_days']} days",
     },
     # ── Volatility ──
@@ -401,7 +456,7 @@ CHAT_PATTERNS = [
             r"volatilit",
             r"(?:sentiment|news).*(?:magnitude|size|absolute).*(?:return|move)",
         ],
-        "static": "The overall sentiment-volatility correlation is r = -0.026 (p = 0.009) — statistically significant but practically meaningless. Most sectors show negligible correlations (|r| < 0.10). The exception is XLRE (Real Estate) at r = -0.496, but this is based on only 37 trading days. XLRE shows a nonlinear pattern: negative sentiment corresponds to higher volatility, consistent with loss aversion theory.",
+        "static": "The overall sentiment-volatility correlation is r = -0.026 (p = 0.009) — statistically significant but practically meaningless. Most sectors show negligible correlations (|r| < 0.10). Sentiment does not meaningfully predict volatility at the aggregate level, consistent with the efficient market hypothesis.",
     },
     # ── Project overview / greeting ──
     {
@@ -410,7 +465,7 @@ CHAT_PATTERNS = [
             r"what (?:is|does) newsalpha",
             r"^(?:hi|hello|hey|help)",
         ],
-        "static": "NewsAlpha analyzes the relationship between news sentiment and S&P 500 sector ETF performance. We processed 233,609 articles from 11 news sources using VADER sentiment analysis and Apache Spark, mapping them to 12 market sectors.\n\nKey findings: overall prediction accuracy is 51.7% (above 50% random baseline), with Consumer Discretionary (XLY) and Technology (XLK) performing best at 53-54%.\n\nTry asking me about:\n  • Sector accuracy — 'which sector is most accurate?'\n  • News sources — 'which news source is best?'\n  • Correlations — 'strongest correlation?'\n  • Specific sectors — 'tell me about XLK' or 'how is energy doing?'\n  • Two sectors — 'correlation between energy and real estate'\n  • Next-day predictions — 'next-day accuracy'\n  • Cross-sector effects — 'cross-sector correlations'\n  • Volatility — 'volatility findings'",
+        "static": "NewsAlpha analyzes the relationship between news sentiment and S&P 500 sector ETF performance. We processed 233,609 articles from 11 news sources using VADER sentiment analysis and Apache Spark, mapping them to 11 market sectors.\n\nKey findings: overall prediction accuracy is 51.7% (above 50% random baseline), with Consumer Discretionary (XLY) and Technology (XLK) performing best at 53-54%.\n\nTry asking me about:\n  • Sector accuracy — 'which sector is most accurate?'\n  • News sources — 'which news source is best?'\n  • Correlations — 'strongest correlation?'\n  • Specific sectors — 'tell me about XLK' or 'how is energy doing?'\n  • Two sectors — 'correlation between energy and financials'\n  • Next-day predictions — 'next-day accuracy'\n  • Cross-sector effects — 'cross-sector correlations'\n  • Volatility — 'volatility findings'",
     },
 ]
 
@@ -419,7 +474,6 @@ NAME_TO_TICKER = {
     "energy": "XLE", "tech": "XLK", "technology": "XLK",
     "financ": "XLF", "financial": "XLF", "financials": "XLF",
     "health": "XLV", "healthcare": "XLV", "health care": "XLV",
-    "real estate": "XLRE", "realestate": "XLRE",
     "consumer disc": "XLY", "consumer discretionary": "XLY",
     "industrial": "XLI", "industrials": "XLI",
     "defense": "ITA", "aerospace": "ITA",
@@ -429,7 +483,7 @@ NAME_TO_TICKER = {
     "staple": "XLP", "staples": "XLP", "consumer staples": "XLP",
 }
 
-TICKERS = {"XLK", "XLF", "XLY", "XLI", "XLC", "XLE", "XLP", "XLV", "XLRE", "XHB", "ITA", "PEJ"}
+TICKERS = {"XLK", "XLF", "XLY", "XLI", "XLC", "XLE", "XLP", "XLV", "XHB", "ITA", "PEJ"}
 
 
 def resolve_ticker(text):
@@ -480,8 +534,6 @@ def handle_sector_lookup(question):
         parts.append(f"  • Mean sentiment: {corr['mean_sentiment']:.4f}")
     if articles and articles.get("total"):
         parts.append(f"  • Total articles contributing: {int(articles['total']):,}")
-    if ticker == "XLRE":
-        parts.append("\nNote: XLRE has only 37 matched trading days. Results should be interpreted with caution.")
     return "\n".join(parts)
 
 
@@ -521,6 +573,10 @@ def handle_two_sector_lookup(question):
 
 def process_chat(question):
     question_lower = question.lower().strip()
+
+    # Block XLRE questions
+    if "xlre" in question_lower or "real estate" in question_lower:
+        return "XLRE (Real Estate) has been excluded from our analysis due to insufficient sample size (only 37 matched trading days). The limited data made results statistically unreliable. Try asking about another sector!"
 
     for entry in CHAT_PATTERNS:
         matched = False
@@ -583,7 +639,7 @@ def process_chat(question):
         "  • News source reliability (e.g. 'which news source is best?')\n"
         "  • Correlations (e.g. 'strongest correlation?')\n"
         "  • Specific sectors (e.g. 'tell me about XLK' or 'how is energy doing?')\n"
-        "  • Two-sector relationships (e.g. 'correlation between energy and real estate')\n"
+        "  • Two-sector relationships (e.g. 'correlation between energy and financials')\n"
         "  • Next-day predictions (e.g. 'next-day accuracy')\n"
         "  • Cross-sector effects (e.g. 'cross-sector correlations')\n"
         "  • Dataset stats (e.g. 'how much data?')\n"
@@ -611,6 +667,7 @@ def chat():
 if __name__ == "__main__":
     print(f"\n  NewsAlpha API")
     print(f"  Database: {os.path.abspath(DATABASE)}")
+    print(f"  XLRE excluded from all results")
     print(f"  Endpoints:")
     print(f"    GET  /api/health")
     print(f"    GET  /api/sectors")
