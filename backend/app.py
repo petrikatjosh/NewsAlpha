@@ -223,17 +223,22 @@ def analysis():
         if source != "all":
             is_limited = True  # can't filter by source in this table
     else:
-        # Cross-sector: show market-sector prices, no sentiment overlay
+        # Cross-sector: sentiment from news_sector, returns from market_sector
+        # Join on matching dates using the same joined_sentiment_market table
         daily_rows = query_db(
-            """SELECT date, NULL AS sentiment,
-                      daily_return_pct AS returnPct,
-                      article_count, market_direction
-               FROM joined_sentiment_market
-               WHERE sector = ?
-               ORDER BY date""",
-            [market_sector],
+            """SELECT m.date AS date,
+                      n.avg_sentiment AS sentiment,
+                      m.daily_return_pct AS returnPct,
+                      n.article_count AS article_count,
+                      m.market_direction AS market_direction
+               FROM joined_sentiment_market m
+               INNER JOIN joined_sentiment_market n
+                   ON m.date = n.date
+               WHERE m.sector = ? AND n.sector = ?
+               ORDER BY m.date""",
+            [market_sector, news_sector],
         )
-        is_limited = True
+        is_limited = False
 
     # ── Sort chronologically (DB date format may not sort as strings) ──
     daily_rows = _sort_rows_by_date(daily_rows)
@@ -301,8 +306,18 @@ def analysis():
         acc = acc_row["accuracy"] if acc_row else 0.5
         trading_days = acc_row["num_days"] if acc_row else 0
     else:
-        acc = 0.5
-        trading_days = len(daily_rows)
+        # Cross-sector: compute accuracy from the joined data we already fetched
+        correct = 0
+        total = 0
+        for r in daily_rows:
+            s = r["sentiment"]
+            ret = r["returnPct"]
+            if s is not None and ret is not None:
+                if (s >= 0 and ret >= 0) or (s < 0 and ret < 0):
+                    correct += 1
+                total += 1
+        acc = correct / total if total > 0 else 0.5
+        trading_days = total
 
     # ── Aggregate stats ──
     sentiments = [r["sentiment"] for r in daily_rows if r["sentiment"] is not None]
