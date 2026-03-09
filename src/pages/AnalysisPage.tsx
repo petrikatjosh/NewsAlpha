@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { Link } from "react-router-dom";
 import "./AnalysisPage.css";
 
@@ -7,21 +7,17 @@ import "./AnalysisPage.css";
  *  ─────────────────────────────────────────────
  *  Senior Design – Sentiment × Market Analysis Dashboard
  *
- *  All data below is MOCK. The component exposes a clean data
- *  contract so the backend can be swapped in later:
+ *  Connected to Flask backend API at /api/analysis.
+ *  Falls back to mock data if the backend is unreachable.
  *
- *    type AnalysisResult = {
- *      dailyData:   { date: string; sentiment: number; returnPct: number }[];
- *      correlation: number;
- *      accuracy:    number;
- *      tradingDays: number;
- *      meanSentiment: number;
- *      meanReturn:    number;
- *      articles:      number;
- *    };
- *
- *  Replace the `useMockData` hook with a real fetch when ready.
+ *  Backend: app.py (Flask) → SQLite/MySQL
+ *  API:     GET /api/analysis?news_sector=XLK&market_sector=XLK&source=all
  */
+
+/* ═══════════════════ CONFIG ═══════════════════ */
+
+// Change this to your backend URL. In production, set to the cluster address.
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 /* ════════════════════ STATIC OPTION LISTS ════════════════════ */
 
@@ -74,7 +70,37 @@ const SECTOR_COLORS: Record<string, string> = {
   XHB:  "#ec4899",
 };
 
-/* ════════════════════ MOCK DATA GENERATOR ════════════════════ */
+/* ════════════════════ DATA TYPES ════════════════════ */
+
+interface DailyDatum {
+  date: string;
+  sentiment: number;
+  returnPct: number;
+}
+
+interface PriceDatum {
+  date: string;
+  price: number;
+  sentiment: number | null;
+  returnPct: number;
+  predicted: boolean | null;
+}
+
+interface AnalysisResult {
+  dailyData: DailyDatum[];
+  priceSeries: PriceDatum[];
+  correlation: number;
+  accuracy: number;
+  tradingDays: number;
+  meanSentiment: number;
+  meanReturn: number;
+  articles: number;
+  isLimited?: boolean;     // true = partial data (cross-sector or per-source)
+  isLive?: boolean;        // true = data came from the real backend
+  error?: string;          // error message if fetch failed
+}
+
+/* ════════════════════ MOCK DATA FALLBACK ════════════════════ */
 
 /*  Deterministic pseudo-random from a string seed so that the
     same dropdown combination always produces the same chart.    */
@@ -87,31 +113,6 @@ function seededRandom(seed: string) {
     h ^= h << 13; h ^= h >> 17; h ^= h << 5;
     return ((h >>> 0) / 4294967296);
   };
-}
-
-interface DailyDatum {
-  date: string;
-  sentiment: number;
-  returnPct: number;
-}
-
-interface PriceDatum {
-  date: string;
-  price: number;
-  sentiment: number | null;   // null = no sentiment data for this day
-  returnPct: number;          // daily return %
-  predicted: boolean | null;  // true = sentiment correctly predicted direction, null = no sentiment
-}
-
-interface AnalysisResult {
-  dailyData: DailyDatum[];
-  priceSeries: PriceDatum[];
-  correlation: number;
-  accuracy: number;
-  tradingDays: number;
-  meanSentiment: number;
-  meanReturn: number;
-  articles: number;
 }
 
 function generateMockData(source: string, newsSector: string, mktSector: string): AnalysisResult {
@@ -133,8 +134,6 @@ function generateMockData(source: string, newsSector: string, mktSector: string)
     returnPct: (rand() * 2 - 1) * 2.5,
   }));
 
-  /* price series — more granular, monthly from 2012–2024.
-     Some months have matching sentiment data, others don't. */
   const priceMonths: string[] = [];
   for (let y = 2012; y <= 2024; y++) {
     for (const m of ["Jan", "Mar", "May", "Jul", "Sep", "Nov"]) {
@@ -142,21 +141,16 @@ function generateMockData(source: string, newsSector: string, mktSector: string)
     }
   }
 
-  let price = 30 + rand() * 40; // starting price
+  let price = 30 + rand() * 40;
   const priceSeries: PriceDatum[] = priceMonths.map((date) => {
     const returnPct = (rand() - 0.47) * 8;
     price = price * (1 + returnPct / 100);
     price = Math.max(price, 5);
-
-    // ~40% of price points have sentiment coverage
     const hasSentiment = rand() > 0.6;
     const sentiment = hasSentiment ? (rand() * 2 - 1) * 0.7 : null;
-
-    // prediction correct if sentiment sign matches return sign
     const predicted = sentiment !== null
       ? (sentiment >= 0 && returnPct >= 0) || (sentiment < 0 && returnPct < 0)
       : null;
-
     return { date, price: +price.toFixed(2), sentiment, returnPct: +returnPct.toFixed(2), predicted };
   });
 
@@ -167,7 +161,78 @@ function generateMockData(source: string, newsSector: string, mktSector: string)
   const meanReturn = +((rand() - 0.45) * 0.12).toFixed(4);
   const articles = Math.round(800 + rand() * 60000);
 
-  return { dailyData, priceSeries, correlation, accuracy, tradingDays, meanSentiment, meanReturn, articles };
+  return {
+    dailyData, priceSeries, correlation, accuracy,
+    tradingDays, meanSentiment, meanReturn, articles,
+    isLive: false, isLimited: false,
+  };
+}
+
+/* ════════════════════ DATA FETCHING HOOK ════════════════════ */
+
+function useAnalysisData(source: string, newsSector: string, mktSector: string) {
+  const [data, setData] = useState<AnalysisResult | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Memoize mock fallback so we can show it instantly if API fails
+  const mockData = useMemo(
+    () => generateMockData(source, newsSector, mktSector),
+    [source, newsSector, mktSector]
+  );
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+
+    const params = new URLSearchParams({
+      news_sector: newsSector,
+      market_sector: mktSector,
+      source,
+    });
+
+    try {
+      const res = await fetch(`${API_BASE}/api/analysis?${params}`, {
+        signal: AbortSignal.timeout(5000), // 5s timeout
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const json = await res.json();
+
+      // Validate the response has the required fields
+      if (!json.dailyData || !json.priceSeries) {
+        throw new Error("Invalid response format");
+      }
+
+      setData({
+        dailyData: json.dailyData,
+        priceSeries: json.priceSeries,
+        correlation: json.correlation ?? 0,
+        accuracy: json.accuracy ?? 50,
+        tradingDays: json.tradingDays ?? 0,
+        meanSentiment: json.meanSentiment ?? 0,
+        meanReturn: json.meanReturn ?? 0,
+        articles: json.articles ?? 0,
+        isLimited: json.isLimited ?? false,
+        isLive: true,
+      });
+    } catch (err) {
+      // Fall back to mock data if the backend is unreachable
+      console.warn("Backend unreachable, using mock data:", err);
+      setData({
+        ...mockData,
+        isLive: false,
+        error: err instanceof Error ? err.message : "Unknown error",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [source, newsSector, mktSector, mockData]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  return { data: data ?? mockData, loading };
 }
 
 /* ════════════════════ TINY COMPONENTS ════════════════════ */
@@ -186,9 +251,29 @@ function StatCard({
   );
 }
 
+/* ════════════════════ LOADING SPINNER ════════════════════ */
+
+function LoadingOverlay() {
+  return (
+    <div style={{
+      position: "absolute", inset: 0, display: "flex",
+      alignItems: "center", justifyContent: "center",
+      background: "rgba(10, 12, 20, 0.6)", borderRadius: 12,
+      zIndex: 10, backdropFilter: "blur(4px)",
+    }}>
+      <div style={{
+        width: 32, height: 32, border: "3px solid var(--border)",
+        borderTopColor: "var(--accent)", borderRadius: "50%",
+        animation: "spin 0.8s linear infinite",
+      }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
 /* ════════════════════ TOOLTIP POSITIONING HELPER ════════════════════ */
 
-const TOOLTIP_W = 170; // approximate tooltip width in px
+const TOOLTIP_W = 170;
 
 function tooltipStyle(x: number, y: number, containerW: number) {
   const overflowsRight = x + TOOLTIP_W + 12 > containerW;
@@ -610,10 +695,8 @@ export default function AnalysisPage() {
   const [newsSector, setNewsSector] = useState("XLK");
   const [mktSector, setMktSector] = useState("XLK");
 
-  const data = useMemo(
-    () => generateMockData(source, newsSector, mktSector),
-    [source, newsSector, mktSector]
-  );
+  // Fetch real data from the backend (falls back to mock if unreachable)
+  const { data, loading } = useAnalysisData(source, newsSector, mktSector);
 
   const sentColor = SECTOR_COLORS[newsSector] || "var(--accent)";
   const retColor = SECTOR_COLORS[mktSector] || "var(--cyan)";
@@ -700,7 +783,8 @@ export default function AnalysisPage() {
         {/* charts column */}
         <div className="ap-charts-stack">
           {/* price + sentiment overlay chart */}
-          <div className="ap-chart-panel ap-fade-in ap-fade-in--d3">
+          <div className="ap-chart-panel ap-fade-in ap-fade-in--d3" style={{ position: "relative" }}>
+            {loading && <LoadingOverlay />}
             <div className="ap-chart-panel__header">
               <div>
                 <h2 className="ap-chart-panel__title">
@@ -729,7 +813,8 @@ export default function AnalysisPage() {
           </div>
 
           {/* sentiment chart */}
-          <div className="ap-chart-panel ap-fade-in ap-fade-in--d4">
+          <div className="ap-chart-panel ap-fade-in ap-fade-in--d4" style={{ position: "relative" }}>
+            {loading && <LoadingOverlay />}
             <div className="ap-chart-panel__header">
               <div>
                 <h2 className="ap-chart-panel__title">
@@ -756,7 +841,8 @@ export default function AnalysisPage() {
           </div>
 
           {/* return chart */}
-          <div className="ap-chart-panel ap-fade-in ap-fade-in--d5">
+          <div className="ap-chart-panel ap-fade-in ap-fade-in--d5" style={{ position: "relative" }}>
+            {loading && <LoadingOverlay />}
             <div className="ap-chart-panel__header">
               <div>
                 <h2 className="ap-chart-panel__title">
@@ -831,14 +917,38 @@ export default function AnalysisPage() {
             </div>
           </div>
 
-          {/* backend notice */}
-          <div className="ap-notice ap-fade-in ap-fade-in--d7">
-            <span className="ap-notice__icon">🔌</span>
-            <span className="ap-notice__text">
-              <strong>Mock data.</strong> This dashboard is using generated placeholder data.
-              Connect the cluster database to populate with real analysis results.
-            </span>
-          </div>
+          {/* connection status notice */}
+          {data.isLive ? (
+            /* ── Connected to real DB ── */
+            data.isLimited ? (
+              <div className="ap-notice ap-fade-in ap-fade-in--d7">
+                <span className="ap-notice__icon">⚠️</span>
+                <span className="ap-notice__text">
+                  <strong>Limited data.</strong> Per-source or cross-sector daily
+                  time series are not available in the database. Showing aggregate
+                  stats from the closest available data.
+                </span>
+              </div>
+            ) : (
+              <div className="ap-notice ap-fade-in ap-fade-in--d7" style={{ borderColor: "var(--green)" }}>
+                <span className="ap-notice__icon">✓</span>
+                <span className="ap-notice__text">
+                  <strong>Live data.</strong> Connected to the analysis database.
+                  Showing real sentiment and market results.
+                </span>
+              </div>
+            )
+          ) : (
+            /* ── Fallback to mock data ── */
+            <div className="ap-notice ap-fade-in ap-fade-in--d7">
+              <span className="ap-notice__icon">🔌</span>
+              <span className="ap-notice__text">
+                <strong>Mock data.</strong> Backend not connected
+                {data.error ? ` (${data.error})` : ""}.
+                Start the Flask server to see real analysis results.
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>
