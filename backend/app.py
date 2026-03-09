@@ -282,9 +282,9 @@ def analysis():
 
     # ── Prediction accuracy ──
     source_map = {
-        "guardian": "The Guardian", "cnn_dailymail": "CNN-DailyMail",
-        "ibt": "Intl Business Times", "globenewswire": "GlobeNewswire",
-        "times_of_india": "Times of India", "bbc": "BBC News",
+        "guardian": "The Guardian", "cnn_dailymail": "CNN-DailyMail/Other",
+        "ibt": "International Business Times", "globenewswire": "GlobeNewswire",
+        "times_of_india": "The Times of India", "bbc": "BBC News",
         "npr": "NPR", "boing_boing": "Boing Boing",
         "business_insider": "Business Insider",
         "globalsecurity": "Globalsecurity.org", "abc": "ABC News",
