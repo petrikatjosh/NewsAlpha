@@ -24,16 +24,16 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
 const NEWS_SOURCES = [
   { value: "all",              label: "All Sources" },
   { value: "guardian",         label: "The Guardian" },
-  { value: "cnn_dailymail",   label: "CNN-DailyMail" },
-  { value: "ibt",             label: "Intl Business Times" },
-  { value: "globenewswire",   label: "GlobeNewswire" },
-  { value: "times_of_india",  label: "Times of India" },
-  { value: "bbc",             label: "BBC News" },
-  { value: "npr",             label: "NPR" },
-  { value: "boing_boing",     label: "Boing Boing" },
-  { value: "business_insider", label: "Business Insider" },
-  { value: "globalsecurity",  label: "Globalsecurity.org" },
-  { value: "abc",             label: "ABC News" },
+  { value: "cnn_dailymail",    label: "CNN-DailyMail" },
+  { value: "globalsecurity",   label: "Globalsecurity.org" },
+  { value: "npr",              label: "NPR" },
+  { value: "globenewswire",    label: "GlobeNewswire" },
+  { value: "times_of_india",   label: "Times of India" },
+  { value: "bbc",              label: "BBC News" },
+  { value: "forbes",           label: "Forbes" },
+  { value: "al_jazeera",       label: "Al Jazeera English" },
+  { value: "boing_boing",      label: "Boing Boing" },
+  { value: "android_central",  label: "Android Central" },
 ];
 
 const NEWS_SECTORS = [
