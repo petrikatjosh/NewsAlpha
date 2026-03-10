@@ -1,15 +1,22 @@
 """
 NewsAlpha — Flask API Backend (with Chatbot)
 =============================================
-Serves SQLite analysis data + chatbot to the React frontend.
+Serves MySQL analysis data + chatbot to the React frontend.
 XLRE excluded from all results per TA recommendation (only 37 trading days).
 
 Usage:
-    pip install flask flask-cors
+    pip install flask flask-cors pymysql
     python app.py
+
+Environment variables (set these before running):
+    MYSQL_HOST     — default: 127.0.0.1
+    MYSQL_PORT     — default: 3306
+    MYSQL_USER     — default: root
+    MYSQL_PASSWORD — default: (empty)
+    MYSQL_DB       — default: mysql
 """
 
-import sqlite3
+import pymysql
 import os
 import re
 from flask import Flask, jsonify, request, g
@@ -19,9 +26,16 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Database helper
+# Database helper — MySQL via PyMySQL
 # ---------------------------------------------------------------------------
-DATABASE = os.environ.get("NEWSALPHA_DB", "cs179g_project.db")
+MYSQL_CONFIG = {
+    "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("MYSQL_PORT", 3306)),
+    "user": os.environ.get("MYSQL_USER", "root"),
+    "password": os.environ.get("MYSQL_PASSWORD", ""),
+    "database": os.environ.get("MYSQL_DB", "mysql"),
+    "cursorclass": pymysql.cursors.DictCursor,
+}
 
 # Sector excluded due to insufficient sample size (37 trading days)
 EXCLUDE = "XLRE"
@@ -29,8 +43,7 @@ EXCLUDE = "XLRE"
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
+        g.db = pymysql.connect(**MYSQL_CONFIG)
     return g.db
 
 
@@ -42,8 +55,10 @@ def close_db(exception):
 
 
 def query_db(sql, args=(), one=False):
-    cur = get_db().execute(sql, args)
-    rows = [dict(row) for row in cur.fetchall()]
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(sql, args)
+    rows = cur.fetchall()
     cur.close()
     return (rows[0] if rows else None) if one else rows
 
@@ -55,13 +70,13 @@ def query_db(sql, args=(), one=False):
 def health():
     try:
         count = query_db(
-            "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != ?",
+            "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != %s",
             [EXCLUDE], one=True,
         )
-        tables = query_db("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = query_db("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name", [MYSQL_CONFIG['database']])
         return jsonify({
             "status": "ok",
-            "database": DATABASE,
+            "database": MYSQL_CONFIG['database'],
             "joined_rows": count["n"],
             "tables": [t["name"] for t in tables],
         })
@@ -75,18 +90,18 @@ def health():
 @app.route("/api/sectors")
 def sectors():
     accuracy = query_db(
-        "SELECT * FROM prediction_accuracy WHERE sector != ? ORDER BY accuracy DESC",
+        "SELECT * FROM prediction_accuracy WHERE sector != %s ORDER BY accuracy DESC",
         [EXCLUDE],
     )
     correlations = query_db(
-        "SELECT * FROM sector_correlations WHERE sector != ? ORDER BY correlation DESC",
+        "SELECT * FROM sector_correlations WHERE sector != %s ORDER BY correlation DESC",
         [EXCLUDE],
     )
     corr_map = {r["sector"]: r for r in correlations}
     article_counts = query_db("""
         SELECT sector, SUM(article_count) as total_articles
         FROM joined_sentiment_market
-        WHERE sector != ?
+        WHERE sector != %s
         GROUP BY sector
     """, [EXCLUDE])
     article_map = {r["sector"]: r["total_articles"] for r in article_counts}
@@ -117,16 +132,16 @@ def timeseries():
     if sector.upper() == EXCLUDE:
         return jsonify([])
 
-    sql = "SELECT * FROM joined_sentiment_market WHERE sector = ?"
+    sql = "SELECT * FROM joined_sentiment_market WHERE sector = %s"
     args = [sector]
 
     start = request.args.get("start")
     end = request.args.get("end")
     if start:
-        sql += " AND date >= ?"
+        sql += " AND date >= %s"
         args.append(start)
     if end:
-        sql += " AND date <= ?"
+        sql += " AND date <= %s"
         args.append(end)
 
     sql += " ORDER BY date ASC"
@@ -135,16 +150,16 @@ def timeseries():
 
 @app.route("/api/timeseries/all")
 def timeseries_all():
-    sql = "SELECT * FROM joined_sentiment_market WHERE sector != ?"
+    sql = "SELECT * FROM joined_sentiment_market WHERE sector != %s"
     args = [EXCLUDE]
 
     start = request.args.get("start")
     end = request.args.get("end")
     if start:
-        sql += " AND date >= ?"
+        sql += " AND date >= %s"
         args.append(start)
     if end:
-        sql += " AND date <= ?"
+        sql += " AND date <= %s"
         args.append(end)
 
     sql += " ORDER BY date ASC, sector ASC"
@@ -216,7 +231,7 @@ def analysis():
                       daily_return_pct AS returnPct,
                       article_count, market_direction
                FROM joined_sentiment_market
-               WHERE sector = ?
+               WHERE sector = %s
                ORDER BY date""",
             [market_sector],
         )
@@ -234,7 +249,7 @@ def analysis():
                FROM joined_sentiment_market m
                INNER JOIN joined_sentiment_market n
                    ON m.date = n.date
-               WHERE m.sector = ? AND n.sector = ?
+               WHERE m.sector = %s AND n.sector = %s
                ORDER BY m.date""",
             [market_sector, news_sector],
         )
@@ -268,14 +283,14 @@ def analysis():
     # ── Correlation ──
     if same_sector:
         corr_row = query_db(
-            "SELECT correlation FROM sector_correlations WHERE sector = ?",
+            "SELECT correlation FROM sector_correlations WHERE sector = %s",
             [news_sector], one=True,
         )
         correlation = corr_row["correlation"] if corr_row else 0.0
     else:
         corr_row = query_db(
             """SELECT correlation FROM cross_sector_correlations
-               WHERE sent_sector = ? AND mkt_sector = ?""",
+               WHERE sent_sector = %s AND mkt_sector = %s""",
             [news_sector, market_sector], one=True,
         )
         correlation = corr_row["correlation"] if corr_row else 0.0
@@ -293,14 +308,14 @@ def analysis():
     if source != "all":
         source_name = source_map.get(source, source)
         acc_row = query_db(
-            "SELECT accuracy, num_days FROM source_accuracy WHERE source_name = ?",
+            "SELECT accuracy, num_days FROM source_accuracy WHERE source_name = %s",
             [source_name], one=True,
         )
         acc = acc_row["accuracy"] if acc_row else 0.5
         trading_days = acc_row["num_days"] if acc_row else 0
     elif same_sector:
         acc_row = query_db(
-            "SELECT accuracy, num_days FROM prediction_accuracy WHERE sector = ?",
+            "SELECT accuracy, num_days FROM prediction_accuracy WHERE sector = %s",
             [news_sector], one=True,
         )
         acc = acc_row["accuracy"] if acc_row else 0.5
@@ -387,7 +402,7 @@ def _bucket_monthly(rows):
 @app.route("/api/correlations/same-sector")
 def same_sector_correlations():
     return jsonify(query_db(
-        "SELECT * FROM sector_correlations WHERE sector != ? ORDER BY correlation DESC",
+        "SELECT * FROM sector_correlations WHERE sector != %s ORDER BY correlation DESC",
         [EXCLUDE],
     ))
 
@@ -397,7 +412,7 @@ def cross_sector_correlations():
     min_days = request.args.get("min_days", 0, type=int)
     return jsonify(query_db(
         """SELECT * FROM cross_sector_correlations
-           WHERE days >= ? AND sent_sector != ? AND mkt_sector != ?
+           WHERE days >= %s AND sent_sector != %s AND mkt_sector != %s
            ORDER BY ABS(correlation) DESC""",
         [min_days, EXCLUDE, EXCLUDE],
     ))
@@ -406,7 +421,7 @@ def cross_sector_correlations():
 @app.route("/api/correlations/next-day")
 def next_day_correlations():
     return jsonify(query_db(
-        "SELECT * FROM next_day_correlations WHERE sector != ?",
+        "SELECT * FROM next_day_correlations WHERE sector != %s",
         [EXCLUDE],
     ))
 
@@ -417,7 +432,7 @@ def next_day_correlations():
 @app.route("/api/accuracy/same-day")
 def same_day_accuracy():
     return jsonify(query_db(
-        "SELECT * FROM prediction_accuracy WHERE sector != ? ORDER BY accuracy DESC",
+        "SELECT * FROM prediction_accuracy WHERE sector != %s ORDER BY accuracy DESC",
         [EXCLUDE],
     ))
 
@@ -425,7 +440,7 @@ def same_day_accuracy():
 @app.route("/api/accuracy/next-day")
 def next_day_accuracy():
     return jsonify(query_db(
-        "SELECT * FROM next_day_accuracy WHERE sector != ? ORDER BY next_day_accuracy DESC",
+        "SELECT * FROM next_day_accuracy WHERE sector != %s ORDER BY next_day_accuracy DESC",
         [EXCLUDE],
     ))
 
@@ -444,7 +459,7 @@ def source_accuracy():
 def volatility():
     try:
         return jsonify(query_db(
-            "SELECT * FROM volatility_correlations WHERE sector != ? ORDER BY correlation ASC",
+            "SELECT * FROM volatility_correlations WHERE sector != %s ORDER BY correlation ASC",
             [EXCLUDE],
         ))
     except Exception:
@@ -457,25 +472,25 @@ def volatility():
 @app.route("/api/stats/overview")
 def overview_stats():
     joined_count = query_db(
-        "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != ?",
+        "SELECT COUNT(*) as n FROM joined_sentiment_market WHERE sector != %s",
         [EXCLUDE], one=True,
     )
     sector_count = query_db(
-        "SELECT COUNT(DISTINCT sector) as n FROM joined_sentiment_market WHERE sector != ?",
+        "SELECT COUNT(DISTINCT sector) as n FROM joined_sentiment_market WHERE sector != %s",
         [EXCLUDE], one=True,
     )
     overall_corr = query_db(
-        "SELECT AVG(correlation) as avg_correlation FROM sector_correlations WHERE sector != ?",
+        "SELECT AVG(correlation) as avg_correlation FROM sector_correlations WHERE sector != %s",
         [EXCLUDE], one=True,
     )
     overall_acc = query_db(
         """SELECT SUM(accuracy * num_days) / SUM(num_days) as weighted_accuracy,
            SUM(num_days) as total_days
-           FROM prediction_accuracy WHERE sector != ?""",
+           FROM prediction_accuracy WHERE sector != %s""",
         [EXCLUDE], one=True,
     )
     date_range = query_db(
-        "SELECT MIN(date) as min_date, MAX(date) as max_date FROM joined_sentiment_market WHERE sector != ?",
+        "SELECT MIN(date) as min_date, MAX(date) as max_date FROM joined_sentiment_market WHERE sector != %s",
         [EXCLUDE], one=True,
     )
     return jsonify({
@@ -493,13 +508,13 @@ def sector_detail(ticker):
     if ticker == EXCLUDE:
         return jsonify({"error": f"{EXCLUDE} excluded due to insufficient sample size"}), 404
 
-    corr = query_db("SELECT * FROM sector_correlations WHERE sector = ?", [ticker], one=True)
-    acc = query_db("SELECT * FROM prediction_accuracy WHERE sector = ?", [ticker], one=True)
-    next_acc = query_db("SELECT * FROM next_day_accuracy WHERE sector = ?", [ticker], one=True)
+    corr = query_db("SELECT * FROM sector_correlations WHERE sector = %s", [ticker], one=True)
+    acc = query_db("SELECT * FROM prediction_accuracy WHERE sector = %s", [ticker], one=True)
+    next_acc = query_db("SELECT * FROM next_day_accuracy WHERE sector = %s", [ticker], one=True)
     ts_summary = query_db(
         """SELECT COUNT(*) as trading_days, MIN(date) as first_date, MAX(date) as last_date,
            AVG(avg_sentiment) as mean_sentiment, AVG(daily_return_pct) as mean_return
-           FROM joined_sentiment_market WHERE sector = ?""",
+           FROM joined_sentiment_market WHERE sector = %s""",
         [ticker], one=True,
     )
     return jsonify({
@@ -517,7 +532,7 @@ def sector_detail(ticker):
 @app.route("/api/filters")
 def filters():
     sectors = query_db(
-        "SELECT DISTINCT sector FROM joined_sentiment_market WHERE sector != ? ORDER BY sector",
+        "SELECT DISTINCT sector FROM joined_sentiment_market WHERE sector != %s ORDER BY sector",
         [EXCLUDE],
     )
     sources = query_db(
@@ -695,7 +710,7 @@ CHAT_PATTERNS = [
             r"what (?:is|does) newsalpha",
             r"^(?:hi|hello|hey|help)",
         ],
-        "static": "NewsAlpha analyzes the relationship between news sentiment and S&P 500 sector ETF performance. We processed 233,609 articles from 11 news sources using VADER sentiment analysis and Apache Spark, mapping them to 11 market sectors.\n\nKey findings: overall prediction accuracy is 51.7% (above 50% random baseline), with Consumer Discretionary (XLY) and Technology (XLK) performing best at 53-54%.\n\nTry asking me about:\n  • Sector accuracy — 'which sector is most accurate?'\n  • News sources — 'which news source is best?'\n  • Correlations — 'strongest correlation?'\n  • Specific sectors — 'tell me about XLK' or 'how is energy doing?'\n  • Two sectors — 'correlation between energy and financials'\n  • Next-day predictions — 'next-day accuracy'\n  • Cross-sector effects — 'cross-sector correlations'\n  • Volatility — 'volatility findings'",
+        "static": "NewsAlpha analyzes the relationship between news sentiment and S&P 500 sector ETF performance. We processed 233,609 articles from 11 news sources using VADER sentiment analysis and Apache Spark, mapping them to 11 market sectors.\n\nKey findings: overall prediction accuracy is 51.7% (above 50% random baseline), with Consumer Discretionary (XLY) and Technology (XLK) performing best at 53-54%.\n\nTry asking me about:\n  • Sector accuracy — 'which sector is most accurate%s'\n  • News sources — 'which news source is best%s'\n  • Correlations — 'strongest correlation%s'\n  • Specific sectors — 'tell me about XLK' or 'how is energy doing%s'\n  • Two sectors — 'correlation between energy and financials'\n  • Next-day predictions — 'next-day accuracy'\n  • Cross-sector effects — 'cross-sector correlations'\n  • Volatility — 'volatility findings'",
     },
 ]
 
@@ -746,11 +761,11 @@ def handle_sector_lookup(question):
     if not ticker:
         return None
 
-    acc = query_db("SELECT * FROM prediction_accuracy WHERE sector = ?", [ticker], one=True)
-    corr = query_db("SELECT * FROM sector_correlations WHERE sector = ?", [ticker], one=True)
-    next_acc = query_db("SELECT * FROM next_day_accuracy WHERE sector = ?", [ticker], one=True)
+    acc = query_db("SELECT * FROM prediction_accuracy WHERE sector = %s", [ticker], one=True)
+    corr = query_db("SELECT * FROM sector_correlations WHERE sector = %s", [ticker], one=True)
+    next_acc = query_db("SELECT * FROM next_day_accuracy WHERE sector = %s", [ticker], one=True)
     articles = query_db(
-        "SELECT SUM(article_count) as total FROM joined_sentiment_market WHERE sector = ?",
+        "SELECT SUM(article_count) as total FROM joined_sentiment_market WHERE sector = %s",
         [ticker], one=True,
     )
 
@@ -775,11 +790,11 @@ def handle_two_sector_lookup(question):
     s1, s2 = found[0], found[1]
 
     row1 = query_db(
-        "SELECT * FROM cross_sector_correlations WHERE sent_sector = ? AND mkt_sector = ?",
+        "SELECT * FROM cross_sector_correlations WHERE sent_sector = %s AND mkt_sector = %s",
         [s1, s2], one=True,
     )
     row2 = query_db(
-        "SELECT * FROM cross_sector_correlations WHERE sent_sector = ? AND mkt_sector = ?",
+        "SELECT * FROM cross_sector_correlations WHERE sent_sector = %s AND mkt_sector = %s",
         [s2, s1], one=True,
     )
 
@@ -865,14 +880,14 @@ def process_chat(question):
 
     return (
         "I'm not sure how to answer that. Try asking about:\n"
-        "  • Sector prediction accuracy (e.g. 'which sector is most accurate?')\n"
-        "  • News source reliability (e.g. 'which news source is best?')\n"
-        "  • Correlations (e.g. 'strongest correlation?')\n"
-        "  • Specific sectors (e.g. 'tell me about XLK' or 'how is energy doing?')\n"
+        "  • Sector prediction accuracy (e.g. 'which sector is most accurate%s')\n"
+        "  • News source reliability (e.g. 'which news source is best%s')\n"
+        "  • Correlations (e.g. 'strongest correlation%s')\n"
+        "  • Specific sectors (e.g. 'tell me about XLK' or 'how is energy doing%s')\n"
         "  • Two-sector relationships (e.g. 'correlation between energy and financials')\n"
         "  • Next-day predictions (e.g. 'next-day accuracy')\n"
         "  • Cross-sector effects (e.g. 'cross-sector correlations')\n"
-        "  • Dataset stats (e.g. 'how much data?')\n"
+        "  • Dataset stats (e.g. 'how much data%s')\n"
         "  • Volatility analysis (e.g. 'volatility findings')"
     )
 
@@ -896,7 +911,7 @@ def chat():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"\n  NewsAlpha API")
-    print(f"  Database: {os.path.abspath(DATABASE)}")
+    print(f"  Database: {MYSQL_CONFIG['host']}:{MYSQL_CONFIG['port']}/{MYSQL_CONFIG['database']}")
     print(f"  XLRE excluded from all results")
     print(f"  Endpoints:")
     print(f"    GET  /api/health")
@@ -915,4 +930,4 @@ if __name__ == "__main__":
     print(f"    POST /api/chat  <- chatbot")
     print()
 
-    app.run(debug=True, port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5000)
