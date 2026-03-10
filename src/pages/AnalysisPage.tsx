@@ -22,18 +22,23 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
 /* ════════════════════ STATIC OPTION LISTS ════════════════════ */
 
 const NEWS_SOURCES = [
-  { value: "all",              label: "All Sources" },
-  { value: "guardian",         label: "The Guardian" },
-  { value: "cnn_dailymail",    label: "CNN-DailyMail" },
-  { value: "globalsecurity",   label: "Globalsecurity.org" },
-  { value: "npr",              label: "NPR" },
-  { value: "globenewswire",    label: "GlobeNewswire" },
-  { value: "times_of_india",   label: "Times of India" },
-  { value: "bbc",              label: "BBC News" },
-  { value: "forbes",           label: "Forbes" },
-  { value: "al_jazeera",       label: "Al Jazeera English" },
-  { value: "boing_boing",      label: "Boing Boing" },
-  { value: "android_central",  label: "Android Central" },
+  { value: "all",                    label: "All Sources" },
+  { value: "guardian",               label: "The Guardian" },
+  { value: "cnn_dailymail",          label: "CNN-DailyMail" },
+  { value: "bbc",                    label: "BBC News" },
+  { value: "business_insider",       label: "Business Insider" },
+  { value: "ibt",                    label: "International Business Times" },
+  { value: "globenewswire",          label: "GlobeNewswire" },
+  { value: "times_of_india",         label: "Times of India" },
+  { value: "globalsecurity",         label: "Globalsecurity.org" },
+  { value: "npr",                    label: "NPR" },
+  { value: "boing_boing",            label: "Boing Boing" },
+  { value: "abc_news",               label: "ABC News" },
+  { value: "phys_org",               label: "Phys.Org" },
+  { value: "forbes",                 label: "Forbes" },
+  { value: "android_central",        label: "Android Central" },
+  { value: "cna",                    label: "CNA" },
+  { value: "al_jazeera",             label: "Al Jazeera English" },
 ];
 
 const NEWS_SECTORS = [
